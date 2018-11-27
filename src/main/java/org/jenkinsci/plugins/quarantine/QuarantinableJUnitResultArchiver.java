@@ -17,11 +17,17 @@ import hudson.tasks.junit.TestResultAction.Data;
 import hudson.tasks.junit.CaseResult;
 import hudson.tasks.junit.JUnitResultArchiver;
 
+import net.sf.json.JSONArray;
+import net.sf.json.JSONObject;
+import net.sf.json.JSONSerializer;
+import org.apache.commons.io.IOUtils;
 import org.kohsuke.stapler.DataBoundConstructor;
 
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
+import java.io.InputStream;
+import java.util.*;
 
 public class QuarantinableJUnitResultArchiver extends JUnitResultArchiver {
 
@@ -85,17 +91,72 @@ public class QuarantinableJUnitResultArchiver extends JUnitResultArchiver {
 				action.setData(data);
 			}
 
+
+
+			listener.getLogger().println("Search workspace:" + workspace + " for quarantined-tests.json files.");
+
+			List<TestSetting> listOfQuaratinedTests = new ArrayList<>();
+
+			try
+			{
+			if(!workspace.isRemote())
+			{
+				Collection<File> files = listFileTree(new File(workspace.getRemote()));
+
+				listener.getLogger().println("Quarantined tests from `quarantined-tests.json` files.");
+				for ( File f: files) {
+					if (f.getName().equals("quarantined-tests.json"))
+					{
+						InputStream is = new FileInputStream(f.getAbsoluteFile());
+						String jsonTxt = IOUtils.toString(is, "UTF-8");
+						// System.out.println(jsonTxt);
+						JSONArray testArray = (JSONArray) JSONSerializer.toJSON(jsonTxt);
+						List<TestSetting> listOfTests = TestSetting.fillList(testArray);
+
+						for (TestSetting testSetting: listOfTests) {
+							listener.getLogger().println("Test: " + testSetting.name + ". Reason: " + testSetting.reason);
+							listOfQuaratinedTests.add(testSetting);
+						}
+					}
+				}
+			}}
+			// catch and bury exceptions while loading the quarantined-tests.json
+			catch (Exception ex)
+			{
+				listener.getLogger().println("EXCEPTION while loading the `quarantined-tests.json` files:" + ex);
+			}
+
+
 			build.addAction(action);
 
 			if (action.getResult().getFailCount() > 0)
 			{
 				int quarantined = 0;
 				for (CaseResult case_result : action.getResult().getFailedTests()) {
-					QuarantineTestAction quarantineAction = case_result.getTestAction(QuarantineTestAction.class);
-					if (quarantineAction != null) {
-						if (quarantineAction.isQuarantined()) {
-							listener.getLogger().println("[Quarantine]: " + case_result.getFullName() + " failed but is quarantined");
-							quarantined++;
+
+					TestSetting matchingTest = null;
+					for (TestSetting ts: listOfQuaratinedTests) {
+
+						if (ts.name.equals(case_result.getFullName()))
+						{
+							matchingTest = ts;
+						}
+					}
+					// unsure if Java 8 is available on all jenkins servers?!
+					// TestSetting matchingTest = listOfQuaratinedTests.stream().filter((test) -> test.name.equals(case_result.getFullName())).findFirst().orElse(null);
+					if (matchingTest != null)
+					{
+						listener.getLogger().println("[Quarantine]: " + case_result.getFullName() + " failed but is quarantined in `quarantined-tests.json`.");
+						quarantined++;
+					}
+					else
+					{
+						QuarantineTestAction quarantineAction = case_result.getTestAction(QuarantineTestAction.class);
+						if (quarantineAction != null) {
+							if (quarantineAction.isQuarantined()) {
+								listener.getLogger().println("[Quarantine]: " + case_result.getFullName() + " failed but is quarantined");
+								quarantined++;
+							}
 						}
 					}
 				}
@@ -109,10 +170,67 @@ public class QuarantinableJUnitResultArchiver extends JUnitResultArchiver {
 		}
 	}
 
+
+	public static Collection<File> listFileTree(File dir) {
+		Set<File> fileTree = new HashSet<File>();
+		if(dir==null||dir.listFiles()==null){
+			return fileTree;
+		}
+		for (File entry : dir.listFiles()) {
+			if (entry.isFile()) fileTree.add(entry);
+			else fileTree.addAll(listFileTree(entry));
+		}
+		return fileTree;
+	}
+
+
 	@Extension
 	public static class DescriptorImpl extends JUnitResultArchiver.DescriptorImpl {
 		public String getDisplayName() {
 			return Messages.QuarantinableJUnitResultArchiver_DisplayName();
 		}
 	}
+
+
+	public static class TestSetting {
+		private String name;
+
+		private String reason;
+
+		public void setName(String name){
+			this.name = name;
+		}
+		public String getName(){
+			return this.name;
+		}
+		public void setReason(String reason){
+			this.reason = reason;
+		}
+		public String getReason(){
+			return this.reason;
+		}
+
+		public static TestSetting fill(JSONObject jo){
+			TestSetting o = new TestSetting();
+			if (jo.containsKey("name")) {
+				o.setName(jo.getString("name"));
+			}
+			if (jo.containsKey("reason")) {
+				o.setReason(jo.getString("reason"));
+			}
+			return o;
+		}
+
+		public static List<TestSetting> fillList(JSONArray ja) {
+			if (ja == null || ja.size() == 0)
+				return null;
+			List<TestSetting> sqs = new ArrayList<TestSetting>();
+			for (int i = 0; i < ja.size(); i++) {
+				sqs.add(fill(ja.getJSONObject(i)));
+			}
+			return sqs;
+		}
+
+	}
+
 }
